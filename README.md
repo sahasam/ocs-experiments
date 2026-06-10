@@ -33,30 +33,25 @@ docker build -f astrasim/synthetic/stage_configs/Dockerfile.bigmem \
 
 ```bash
 cd astrasim/synthetic
-
-# 1. Generate Chakra ETs via STAGE (CPU, ~seconds)
-DP=4 TP=8 PP=2 MODEL=8b bash generate_stage_et.sh
-# → results/llama3_8b_tp8_pp2_dp4/*.et + comm_group.json
-
-# 2. Run AstraSim with trace logging enabled (~3s for 64 ranks in Docker)
-SYSTEM_CFG=$(pwd)/stage_configs/system_trace.json \
-  bash run_astrasim_stage.sh llama3_8b_tp8_pp2_dp4 64
-# → results/llama3_8b_tp8_pp2_dp4/logs/trace/log*.log
-
-# 3. Run the OCS C-sweep
-python -c "
-from pathlib import Path
-from hybrid_net import dag_sim, ocs_replay
-ED = Path('results/llama3_8b_tp8_pp2_dp4')
-g  = dag_sim.load_comm_groups(f'{ED}/comm_group.json')
-nodes,ets,coll,sr = ocs_replay.build_graph(
-    ED/'logs/trace', ED, 'llama3_8b_tp8_pp2_dp4', 64, g)
-for C in (10**9, 32, 16, 8, 4, 2, 1):
-    s = ocs_replay.replay(nodes, coll, sr, C, 64)
-    wall = max(s.values())/1e6
-    print(f'C={C:>10}  wall={wall:.1f}ms')
-"
+make           # generate ETs → simulate → OCS C-sweep (defaults: 8B TP8 PP2 DP4)
+make help      # show all targets and current variable values
 ```
+
+Override parallelism or model:
+
+```bash
+MODEL=70b DP=8 make
+```
+
+Individual steps:
+
+```bash
+make et        # generate Chakra ETs via STAGE (CPU, ~seconds)
+make sim       # run AstraSim with trace logging (~3 s, Docker)
+make sweep     # run OCS circuit-capacity C-sweep
+```
+
+See [`astrasim/synthetic/README.md`](astrasim/synthetic/README.md) for full details.
 
 ## Experiments
 
@@ -117,6 +112,8 @@ OCS tier = DP all-reduces (group size 4) + PP point-to-point sends. TP collectiv
 
 ```
 astrasim/synthetic/
+├── Makefile                    # entry point: make / make et / make sim / make sweep
+├── run_ocs_sweep.py            # OCS C-sweep CLI (wraps ocs_replay)
 ├── generate_stage_et.sh        # STAGE wrapper: DP/TP/PP/MODEL → Chakra ETs
 ├── run_astrasim_stage.sh       # AstraSim Docker runner (bigmem image, trace logging)
 ├── stage_configs/              # system.json, memory.json, Dockerfile.bigmem
