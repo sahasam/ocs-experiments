@@ -1,0 +1,17 @@
+# astra-sim-bigmem: astra-sim:latest + jemalloc.
+#
+# The pinned astra-sim analytical binary corrupts the glibc heap during its
+# post-statistics teardown when simulating many heavy ranks in one process
+# (e.g. 64 ranks x ~681 nodes from a STAGE Llama-3 8B workload) -- glibc aborts
+# with "malloc_consolidate(): unaligned fastbin chunk detected". jemalloc uses a
+# different arena/allocation strategy that both tolerates this pattern and
+# handles the large allocations more efficiently. Combined with a larger Docker
+# VM memory budget, this lets the full 64-rank run complete cleanly.
+FROM astra-sim:latest
+
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libjemalloc2 \
+ && rm -rf /var/lib/apt/lists/*
+
+# Preload jemalloc for every process in the container.
+ENV LD_PRELOAD=/usr/lib/aarch64-linux-gnu/libjemalloc.so.2

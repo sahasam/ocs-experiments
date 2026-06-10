@@ -1,0 +1,4 @@
+topology: [ Switch ]
+npus_count: [ 8 ]
+bandwidth: [ 1000000.0 ]  # GB/s — absurdly fast, drives comm time -> 0
+latency: [ 1.0 ]  # ns — ditto

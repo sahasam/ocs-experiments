@@ -1,0 +1,151 @@
+# ocs-experiments
+
+Simulation study of **optical circuit switching (OCS) for LLM training interconnects**, using [STAGE](https://github.com/astra-sim/symbolic_tensor_graph) to generate Chakra execution traces and [AstraSim](https://github.com/astra-sim/astra-sim) for coupled distributed training simulation.
+
+The central question: how much does circuit-switched (optical) inter-node fabric hurt a training step under different parallelism layouts, and what determines the impact?
+
+## Pipeline
+
+```
+STAGE (CPU, symbolic)          AstraSim (Docker)            OCS trace-replay (Python)
+──────────────────────   →    ──────────────────────   →   ───────────────────────────
+Chakra ETs for any             Coupled per-rank timing       Re-time OCS tier under
+DP/TP/PP/SP layout             (PP stalls, compute           capacity-C contention,
+No GPU cluster needed          overlap, roofline)            propagate delays
+```
+
+**No GPU cluster required.** STAGE generates symbolically-exact Chakra ETs validated at 0.23% comm-volume error vs a real 128-GPU H100 run. AstraSim runs in Docker.
+
+## Setup
+
+```bash
+python3 -m venv .venv
+.venv/bin/pip install -r requirements-dev.txt
+bash scripts/install_chakra.sh          # clones mlcommons/chakra, installs --no-deps
+
+# Docker image for AstraSim (jemalloc variant required for 64-rank runs)
+docker build -f astrasim/synthetic/stage_configs/Dockerfile.bigmem \
+             -t astra-sim-bigmem:latest \
+             astrasim/synthetic/stage_configs/
+```
+
+## Running an experiment
+
+```bash
+cd astrasim/synthetic
+
+# 1. Generate Chakra ETs via STAGE (CPU, ~seconds)
+DP=4 TP=8 PP=2 MODEL=8b bash generate_stage_et.sh
+# → results/llama3_8b_tp8_pp2_dp4/*.et + comm_group.json
+
+# 2. Run AstraSim with trace logging enabled (~3s for 64 ranks in Docker)
+SYSTEM_CFG=$(pwd)/stage_configs/system_trace.json \
+  bash run_astrasim_stage.sh llama3_8b_tp8_pp2_dp4 64
+# → results/llama3_8b_tp8_pp2_dp4/logs/trace/log*.log
+
+# 3. Run the OCS C-sweep
+python -c "
+from pathlib import Path
+from hybrid_net import dag_sim, ocs_replay
+ED = Path('results/llama3_8b_tp8_pp2_dp4')
+g  = dag_sim.load_comm_groups(f'{ED}/comm_group.json')
+nodes,ets,coll,sr = ocs_replay.build_graph(
+    ED/'logs/trace', ED, 'llama3_8b_tp8_pp2_dp4', 64, g)
+for C in (10**9, 32, 16, 8, 4, 2, 1):
+    s = ocs_replay.replay(nodes, coll, sr, C, 64)
+    wall = max(s.values())/1e6
+    print(f'C={C:>10}  wall={wall:.1f}ms')
+"
+```
+
+## Experiments
+
+### Exp 1 — Guard band × circuit bandwidth sweep (sirius-like OCS)
+
+**Config:** Llama-3 8B, DP=16, 2 nodes, `sirius_like_circuit` preset (100 ns slot, rotor mode).
+Clock-skew σ = 1 ns. Compute-ideal step = 435.7 ms.
+
+Cells marked `✗` are infeasible: circuit collision probability exceeds 1e-6 at that guard/σ combination.
+
+**Step time (ms) — rows: guard band, columns: circuit bandwidth**
+
+| guard \ bw | 100 GB/s | 50 GB/s | 30 GB/s | 10 GB/s | 3 GB/s |
+|---|---|---|---|---|---|
+| ≤7 ns | ✗ | ✗ | ✗ | ✗ | ✗ |
+| 10 ns | **436.7** | 437.0 | 437.9 | 444.6 | 876.7 |
+| 15 ns | 436.7 | 437.1 | 438.1 | 445.4 | 919.1 |
+| 30 ns | 436.7 | 437.4 | 438.6 | 448.5 | 1082.7 |
+| 50 ns | 436.9 | 438.1 | 439.7 | 545.2 | 1453.4 |
+| 70 ns | 437.7 | 439.7 | 444.6 | 804.6 | 2318.3 |
+| 90 ns | 443.2 | 545.2 | 804.6 | 2102.1 | 6643.1 |
+
+**Finding:** At σ=1 ns, **guard=10 ns is the sweet spot** — first feasible cell (P_collision≈3e-12), effective bandwidth 90% of nominal, step time within 0.2% of compute floor. The feasibility cliff is sharp (guard=7 ns fails, guard=10 ns is fine); the bandwidth tax above it is linear. For compute-bound LLM training at ≥30 GB/s, over-guarding up to 50 ns costs <1%; for comm-dominated workloads (≤10 GB/s), the same over-guard costs 25%.
+
+---
+
+### Exp 2 — OCS capacity sweep, TP8/PP2/DP4 hybrid parallelism
+
+**Config:** Llama-3 8B, 64 ranks (TP=8, PP=2, DP=4). STAGE-generated traces, AstraSim roofline (H100: peak 300 TFLOPS, mem-bw 900 GB/s). AstraSim baseline: wall=1549 ms, GPU=596 ms, exposed comm=953 ms.
+
+OCS tier = DP all-reduces (group size 4) + PP point-to-point sends. TP collectives stay on NVLink (intra-node, not OCS-visible). `C` = number of simultaneous circuits the fabric can support.
+
+**Exposed step-time impact vs C=∞ baseline (1549 ms)**
+
+| Circuits (C) | Max wall (ms) | Step overhead |
+|---|---|---|
+| ∞ (packet ref) | 1549 | 0% |
+| 32 | 1549 | 0% |
+| 16 | 1555 | +0.4% |
+| 8 | 1566 | +1.1% |
+| 4 | 1589 | **+2.6%** |
+| 2 | 1636 | +5.6% |
+| 1 | 1728 | +11.6% |
+
+**Finding:** For 8B TP8/PP2/DP4, OCS contention has small exposed impact unless severely under-provisioned. At C=4 (4 simultaneous circuits for 64 ranks), step time grows by only 2.6% despite raw burst-blocking of +691 ms — **~74% of contention hides behind backward compute**. The dominant step cost is the PP bubble (rank 0 pipeline recv-wait ≈ 1056 ms), which OCS barely touches. C≥32 is identical to a packet-switched fabric.
+
+**Validation:** the replay reproduces AstraSim's coupled timing exactly at C=∞ (rank0=1549.08 ms, rank32=1057.74 ms) — PP asymmetry and pipeline stalls are preserved by construction.
+
+---
+
+### Open experiments
+
+- **Rotor latency-floor sweep** — replay currently models bandwidth-sharing only; the `T_cycle/2` circuit-wait floor for PP sends is not yet applied. Negligible for fast/ns rotors (sirius-like); potentially significant for slow/ms MEMS.
+- **PP-heavy TP8/PP4/DP2** — adversarial config for OCS (smaller DP group, heavier pipeline pressure). Run with `dp_group_size=2` in `ocs_penalty.py` / `ocs_replay.py`.
+- **GPU capture validation** — real Megatron-LM trace (Phase 0: 8×A100, pure DP) to validate STAGE byte-counts and compute times.
+
+## Repo layout
+
+```
+astrasim/synthetic/
+├── generate_stage_et.sh        # STAGE wrapper: DP/TP/PP/MODEL → Chakra ETs
+├── run_astrasim_stage.sh       # AstraSim Docker runner (bigmem image, trace logging)
+├── stage_configs/              # system.json, memory.json, Dockerfile.bigmem
+├── hybrid_net/
+│   ├── trace_loader.py         # parse AstraSim trace log → per-node timeline
+│   ├── ocs_penalty.py          # isolate OCS-tier flows, concurrency profile
+│   ├── ocs_replay.py           # delay-propagation C-sweep (the deliverable)
+│   ├── dag_sim.py              # roofline + collective math (used by replay)
+│   ├── et_loader.py            # Chakra ET reader
+│   ├── collectives.py          # direct-algorithm collective cost model
+│   ├── tdm_model.py            # TDM/rotor OCS bandwidth derating
+│   ├── scheduler.py            # circuit scheduling
+│   └── presets.py              # sirius_like, rotornet_like, etc.
+├── workloads/                  # legacy per-rank workload descriptors
+└── results/                    # gitignored (ETs, logs, traces)
+src/
+├── model.py                    # nanoGPT (CPU smoke test)
+├── trace_capture.py            # ExecutionTraceObserver wrapper
+├── megatron_trace_hook.py      # Megatron-LM step capture hook
+configs/
+├── llama3_70b.yaml             # TP=8, PP=2, DP=4 capture config
+scripts/
+├── install_megatron.sh
+├── launch_megatron.sh
+└── convert_to_chakra.sh
+```
+
+## Key references
+
+- [STAGE](https://arxiv.org/abs/2511.10480) (arXiv 2511.10480) — symbolic tensor graph ET generation
+- [AstraSim](https://github.com/astra-sim/astra-sim) — distributed ML system simulator
+- [Chakra](https://github.com/mlcommons/chakra) — execution trace schema

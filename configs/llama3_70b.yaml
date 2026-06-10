@@ -1,0 +1,26 @@
+# Llama-3 70B target for the real-GPU trace-capture run.
+# 8 nodes x 8 H100 = 64 GPUs total. TP=8 fits within a node (NVLink),
+# PP=2 spans nodes, DP=4 replicates across the remaining axis.
+
+# Model architecture (matches Llama-3 70B / Meta-Llama-3-70B).
+n_layer: 80
+n_head: 64
+n_kv_head: 8          # GQA: 64 query heads, 8 KV heads
+n_embd: 8192
+ffn_hidden: 28672
+seq_len: 8192
+vocab_size: 128256
+
+# Parallelism plan.
+tensor_parallel: 8
+pipeline_parallel: 2
+data_parallel: 4
+
+# Batch.
+micro_batch_size: 1
+global_batch_size: 64   # = micro * DP * grad_accum; with grad_accum=16, micro=1, DP=4
+
+# Profile window. One step of ET is ~hundreds of MB at this scale;
+# capture exactly one to keep traces manageable.
+profile_step_start: 5
+profile_step_end: 6

@@ -1,0 +1,9 @@
+vocab_size: 1024
+n_layer: 6
+n_head: 4
+n_embd: 256
+block_size: 128
+micro_batch_size: 1
+global_batch_size: 4    # = DDP world_size; no grad accum -> small trace
+warmup_steps: 2
+profile_steps: 3

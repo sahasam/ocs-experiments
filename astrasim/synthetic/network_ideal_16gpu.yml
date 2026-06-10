@@ -1,0 +1,4 @@
+topology: [ Switch, Ring ]
+npus_count: [ 8, 2 ]
+bandwidth: [ 1000000.0, 1000000.0 ]  # GB/s — absurdly fast at both tiers
+latency: [ 1.0, 1.0 ]  # ns

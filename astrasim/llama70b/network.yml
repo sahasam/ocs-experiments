@@ -1,0 +1,4 @@
+topology: [ Switch, Ring ]
+npus_count: [ 8, 8 ]              # 8 nodes x 8 GPUs/node = 64 NPUs
+bandwidth: [ 50.0, 450.0 ]        # IB ~50 GB/s effective per NIC, NVLink ~450 GB/s effective per link
+latency: [ 5000.0, 100.0 ]        # IB ~5 us, NVLink ~100 ns
