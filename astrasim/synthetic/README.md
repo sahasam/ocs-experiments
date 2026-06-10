@@ -5,7 +5,40 @@ the AstraSim analytical backend, without ever touching a GPU. It exists because
 the user's Path C nanoGPT traces are unusable for AstraSim (see top-level
 `GOTCHAS.md` §5–6), and a real GPU capture needs hardware we don't have yet.
 
-## How it works
+## Quick start — STAGE + OCS sweep (the current workflow)
+
+```bash
+cd astrasim/synthetic
+
+make           # generate ETs → simulate → OCS C-sweep (defaults: 8B TP8 PP2 DP4)
+make help      # show all targets and current variable values
+```
+
+Override parallelism or model:
+
+```bash
+MODEL=70b DP=8 make
+```
+
+Run individual steps:
+
+```bash
+make et        # generate Chakra ETs via STAGE (~seconds, CPU-only)
+make sim       # run AstraSim with trace logging (~3 s for 64 ranks, Docker)
+make sweep     # run OCS circuit-capacity C-sweep
+```
+
+`NPUS` and `WORKLOAD` are derived automatically from `DP/TP/PP/SP/MODEL`
+but can be set explicitly: `make sweep WORKLOAD=llama3_8b_tp8_pp2_dp4 NPUS=64`.
+
+The sweep calls `run_ocs_sweep.py`, which can also be used directly:
+
+```bash
+python run_ocs_sweep.py llama3_8b_tp8_pp2_dp4 64
+python run_ocs_sweep.py llama3_8b_tp8_pp2_dp4 64 --capacities inf,16,8,4,2,1
+```
+
+## How it works (legacy DP-only pipeline)
 
 ```
 [ compute_times.py ]              <- per-block roofline FLOPs -> H100 BF16 us
