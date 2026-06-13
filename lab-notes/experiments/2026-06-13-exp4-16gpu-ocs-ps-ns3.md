@@ -41,7 +41,9 @@ Both sides ran with ring all-reduce for a clean apples-to-apples comparison.
 | PP stage 1 (ranks 8–15) | 3,289 ms | +2.7% |
 | PP stage 0 (ranks 0–7) | n/a — killed | est. +3–5% |
 
-The container was killed (via SIGTERM propagation from the Docker client process dying) right as stage 0 began its ring all-reduce. Stage 0 finishes ~1.58s of simulated time after stage 1 in the OCS run — it must wait for stage 1's backward gradients before doing its own DP all-reduce. The simulation was at ~4.93s simulated when it stopped; stage 0's "finished" line never appeared.
+The container was killed right as stage 0 began its ring all-reduce. Stage 0 finishes ~1.58s of simulated time after stage 1 in the OCS run — it must wait for stage 1's backward gradients before doing its own DP all-reduce. The simulation was at ~4.93s simulated when it stopped; stage 0's "finished" line never appeared.
+
+**Why it died — the Claude session was the parent process.** The run was launched with a foreground `docker run` (no `-d`) from inside a Claude Code Bash tool call. `docker run` in foreground mode ties the container's lifetime to the launching client process. When the Claude session that owned that Bash subshell ended (turn/session teardown), the shell — and with it the foreground `docker run` client — was terminated, and Docker propagated SIGTERM to the container. AstraSim caught the signal and exited mid-run, flushing only the ranks that had already finished (stage 1), so stage 0's result was lost. Nothing was wrong with the simulation itself; it was killed by the harness lifecycle, not by an error. Fix: launch detached (`docker run -d`) so the container outlives the session, and tail the log file to monitor (see `/run-ps`).
 
 **ns-3 flow-level breakdown (15,248 total flows):**
 
