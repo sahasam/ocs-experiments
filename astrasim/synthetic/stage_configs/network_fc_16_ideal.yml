@@ -1,0 +1,6 @@
+# Ideal floor: flat FullyConnected, 16 NPUs, ~infinite bandwidth, 500 ns latency.
+# Gate A reference: the coupled scheduler at infinite bw must reproduce this.
+topology: [ FullyConnected ]
+npus_count: [ 16 ]
+bandwidth: [ 1000000.0 ]   # GB/s -- effectively unlimited
+latency: [ 500.0 ]         # ns
