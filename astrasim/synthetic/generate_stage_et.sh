@@ -36,8 +36,11 @@ if [[ "$MODEL" == "8b" ]]; then
 elif [[ "$MODEL" == "70b" ]]; then
   DMODEL=${DMODEL:-8192};  DFF=${DFF:-28672}; HEAD=${HEAD:-64}
   KVHEAD=${KVHEAD:-8};     STACKS=${STACKS:-80}
+elif [[ "$MODEL" == "405b" ]]; then
+  DMODEL=${DMODEL:-16384}; DFF=${DFF:-53248};  HEAD=${HEAD:-128}
+  KVHEAD=${KVHEAD:-8};     STACKS=${STACKS:-126}
 else
-  echo "unknown MODEL=$MODEL (use 8b or 70b, or set DMODEL/DFF/HEAD/KVHEAD/STACKS)" >&2
+  echo "unknown MODEL=$MODEL (use 8b, 70b, 405b, or set DMODEL/DFF/HEAD/KVHEAD/STACKS)" >&2
   exit 2
 fi
 SEQ=${SEQ:-8192}

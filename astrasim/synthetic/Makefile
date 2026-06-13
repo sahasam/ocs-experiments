@@ -33,7 +33,7 @@ sim:
 	SYSTEM_CFG=$(SYSTEM_CFG) bash $(HERE)run_astrasim_stage.sh $(WORKLOAD) $(NPUS)
 
 sweep:
-	$(PYTHON) $(HERE)run_ocs_sweep.py $(WORKLOAD) $(NPUS)
+	$(PYTHON) $(HERE)run_ocs_sweep.py $(WORKLOAD) $(NPUS) --dp-group-size $(DP)
 
 help:
 	@printf "Targets:\n"

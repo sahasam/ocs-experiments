@@ -135,17 +135,26 @@ def _oversub_factor(rn: RNode, pieces, capacity: int) -> float:
     return acc / (e - s) if e > s else 1.0
 
 
-def replay(nodes, coll_inst, sr_edges, capacity: int, num_ranks: int
-           ) -> dict[int, float]:
-    """Propagate capacity-C contention delay; return per-rank step time (ns)."""
+def replay(nodes, coll_inst, sr_edges, capacity: int, num_ranks: int,
+           t_setup_ns: float = 0.0) -> dict[int, float]:
+    """Propagate capacity-C contention + circuit-setup delay; return per-rank step time (ns).
+
+    t_setup_ns: per-PP-send circuit establishment wait (ns).  Applied to every
+    COMM_SEND_NODE on the OCS tier before bandwidth stretch.  Models rotor
+    half-cycle or MEMS reconfiguration time on the PP critical path.
+    0 = fast EO / Sirius-class (negligible); ~1e7 = 10 ms MEMS.
+    """
     pieces = _concurrency_breakpoints(nodes)
-    # extra duration per node under this C
+    # extra duration per node under this C + t_setup
     for rn in nodes.values():
         if rn.is_ocs and capacity < 10**9:
             f = _oversub_factor(rn, pieces, capacity)
             rn.extra = (f - 1.0) * (rn.end - rn.start)
         else:
             rn.extra = 0.0
+        # PP sends pay a per-circuit setup wait on top of bandwidth contention
+        if t_setup_ns > 0 and rn.type == COMM_SEND_NODE and rn.is_ocs:
+            rn.extra += t_setup_ns
         rn.delay = 0.0
 
     # collective-instance membership lookup: node -> its group members
@@ -154,7 +163,13 @@ def replay(nodes, coll_inst, sr_edges, capacity: int, num_ranks: int
         for m in members:
             member_of[m] = members
 
-    order = sorted(nodes.keys(), key=lambda k: nodes[k].start)
+    # Sort by end time (not start): AstraSim sets recv.end == send.end, but
+    # recv.start=0 (pre-posted), so a start-time sort puts recvs before their
+    # matched sends and breaks sr_edge delay propagation.  Tiebreak: sends
+    # before recvs so recv picks up the send's delay when ends are equal.
+    order = sorted(nodes.keys(),
+                   key=lambda k: (nodes[k].end,
+                                  0 if nodes[k].type == COMM_SEND_NODE else 1))
     baseline_end = {k: nodes[k].end for k in nodes}
 
     def slack(pred, node) -> float:

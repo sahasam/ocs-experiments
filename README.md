@@ -102,10 +102,29 @@ OCS tier = DP all-reduces (group size 4) + PP point-to-point sends. TP collectiv
 
 ---
 
+---
+
+### Exp 3 — ns-3 fat-tree PS baseline: topology mismatch finding
+
+**Config:** Same workload as Exp 2 (8B TP8/PP2/DP8, 128 ranks). Physical network: 2-tier fat-tree, 8 leaf × 16 GPUs, 8 spine, 400 Gbps / 0.5 µs links, 2:1 oversubscription. Congestion control: HPCC.
+
+**Outcome:** Run was terminated after 24 hours without completing. After 24 h, ns-3 simulated time reached 2,051 ms (vs 778 ms analytical baseline — 2.6× slowdown) with 226K flows completed and no rank finished. FCTs grew from ~0.3 ms to 1–5 ms over the run.
+
+**Root cause:** `direct` all-reduce (designed for OCS/fully-connected) on a 2:1 oversubscribed fat-tree. DP=8 with direct algorithm generates **896 simultaneous 8 MB cross-switch flows** competing for 64 leaf-spine links → ~14:1 link overload. HPCC oscillations cascaded through the entire step.
+
+**Key finding:** This is not a valid PS baseline. A real PS cluster on a fat-tree would use **ring all-reduce** (~128 concurrent flows vs 896). The correct comparison is OCS+direct vs PS+ring — framing OCS's advantage as *enabling the more efficient collective algorithm*, not just avoiding congestion.
+
+**Next step:** Re-run ns-3 with ring algorithm in system config, or use analytical congestion-aware + Switch as a fast conservative baseline.
+
+See [`experiments/exp3-ns3-fat-tree-baseline.md`](experiments/exp3-ns3-fat-tree-baseline.md) for full details.
+
+---
+
 ### Open experiments
 
-- **Rotor latency-floor sweep** — replay currently models bandwidth-sharing only; the `T_cycle/2` circuit-wait floor for PP sends is not yet applied. Negligible for fast/ns rotors (sirius-like); potentially significant for slow/ms MEMS.
-- **PP-heavy TP8/PP4/DP2** — adversarial config for OCS (smaller DP group, heavier pipeline pressure). Run with `dp_group_size=2` in `ocs_penalty.py` / `ocs_replay.py`.
+- **PS baseline (fair)** — re-run ns-3 with `ring` all-reduce, or run analytical congestion-aware + Switch topology as a fast lower bound.
+- **Rotor latency-floor sweep** — replay models bandwidth-sharing only; `T_cycle/2` circuit-wait floor for PP sends not yet applied. Negligible for ns rotors; potentially significant for ms MEMS.
+- **PP-heavy TP8/PP4/DP2** — adversarial OCS config (smaller DP group, heavier pipeline pressure).
 - **GPU capture validation** — real Megatron-LM trace (Phase 0: 8×A100, pure DP) to validate STAGE byte-counts and compute times.
 
 ## Repo layout
