@@ -89,14 +89,33 @@ run 4.1× slower than ideal on the shared fat-tree spine. OCS's congestion-free 
 *is* essentially the ideal floor (direct @ 50 ≈ floor + 0.3%), so the whole OCS-vs-PS
 gap will come from PS congestion, not the algorithm.
 
-## What's next — the PS thin-Clos baseline
+## The PS thin-Clos baseline (running)
 
 To isolate "PP traffic on a thin shared spine" (the case OCS's dedicated circuits win),
 built `stage_configs/ns3_topo_16_clos_thin.txt`: a 3-switch Clos (2 leaf + 1 spine).
 Each PP stage's 8-rank DP group sits on its own leaf (DP all-reduce stays intra-pod),
-so **all cross-stage PP traffic funnels through the single 800 Gbps spine** (4:1
-oversubscribed). Run it with `/run-ps` (detached `docker run -d` — see Exp 4 for why),
-then compare its PP-send congestion against this OCS floor.
+so **all cross-stage PP traffic funnels through the single spine**.
+
+Originally specced at 4:1 (800 Gbps leaf uplinks), but this ns-3 build's HPCC INT
+telemetry rejects non-standard link rates (`Error: IntHeader unknown rate:
+800000000000`), corrupting the congestion model. Dropped the uplink to a single
+**400 Gbps** spine link per leaf → **8:1 oversubscription**, deliberately thinner than
+Exp 4's 4:1 fat-tree and all-standard-rate so HPCC stays valid. (8:1 vs 4:1 means this
+isn't a controlled A/B against Exp 4 — it's a deliberately stressed thin fabric to show
+the OCS-favorable regime.)
+
+Run via the updated `run_astrasim_ns3.sh` with `DETACH=1` (container outlives the shell —
+see Exp 4), ring (`system_ns3.json`), payload 1000 + HPCC to match Exp 4's settings so
+topology is the only changed variable vs the fat-tree. Compare the resulting PP-send
+slowdown (Exp 4 fat-tree: 4.1×) against this OCS floor.
+
+Invocation:
+```bash
+DETACH=1 SYSTEM_CFG=.../system_ns3.json \
+  NS3_TOPO_FILE=.../ns3_topo_16_clos_thin.txt \
+  NS3_OUT_SUBDIR=ns3_output_clos LOG_NAME=astrasim_ns3_clos \
+  bash run_astrasim_ns3.sh llama3_8b_tp1_pp2_dp8 16
+```
 
 ## Artifacts
 

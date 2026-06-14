@@ -34,9 +34,11 @@ ASTRASIM_IMAGE=${ASTRASIM_IMAGE:-astra-sim-bigmem:latest}
 DOCKER_SHM=${DOCKER_SHM:-4g}
 
 LOG_DIR="${RESULTS_DIR}/logs"
-NS3_OUT_DIR="${RESULTS_DIR}/ns3_output"
+# NS3_OUT_SUBDIR isolates outputs of different topologies for the same workload
+# (e.g. ns3_output = fat-tree, ns3_output_clos = thin Clos) so they don't clobber.
+NS3_OUT_DIR="${RESULTS_DIR}/${NS3_OUT_SUBDIR:-ns3_output}"
 mkdir -p "$LOG_DIR" "$NS3_OUT_DIR"
-LOG="${LOG_DIR}/astrasim_ns3.log"
+LOG="${LOG_DIR}/${LOG_NAME:-astrasim_ns3}.log"
 
 # ns-3 input files: flow.txt (background flows, empty = none) and trace.txt
 # (node IDs to monitor at packet level, 0 = none). Use empty flow from ns-3
@@ -110,6 +112,33 @@ EOF
 NS3_CFG_CONTAINER="/app/llm-parallelism/astrasim/synthetic/${NS3_CFG_LOCAL}"
 
 echo "Running AstraSim+ns-3 on $WORKLOAD_NAME ($NPUS ranks) [image=$ASTRASIM_IMAGE] ..."
+echo "  topology=$NS3_TOPO_FILE  out=$NS3_OUT_DIR  log=$LOG"
+
+# DETACH=1 launches the container with `docker run -d` so it OUTLIVES the
+# launching shell (and any Claude session teardown). In foreground mode Docker
+# ties the container's lifetime to the client process; when that dies it SIGTERMs
+# the container and you lose the still-running ranks (the Exp 4 failure). Monitor
+# a detached run with: docker logs -f <container>  (or tail the fct/qlen files).
+CONTAINER_NAME=${CONTAINER_NAME:-astrasim-ns3-${WORKLOAD_NAME}-${NS3_OUT_SUBDIR:-ns3_output}}
+if [[ "${DETACH:-0}" == "1" ]]; then
+  docker rm -f "$CONTAINER_NAME" >/dev/null 2>&1 || true
+  CID=$(docker run -d --name "$CONTAINER_NAME" --shm-size="$DOCKER_SHM" \
+    -v /Users/sahas/workplace/astra-sim:/app/astra-sim \
+    -v /Users/sahas/workplace/llm-parallelism:/app/llm-parallelism \
+    "$ASTRASIM_IMAGE" \
+    "$ASTRASIM_NS3_BIN" \
+      --workload-configuration="$WORKLOAD_PREFIX" \
+      --comm-group-configuration="$COMM_GROUP" \
+      --system-configuration="$SYSTEM_CFG" \
+      --network-configuration="$NS3_CFG_CONTAINER" \
+      --remote-memory-configuration="$MEMORY_CFG" \
+      --logical-topology-configuration="$LOGICAL_TOPO_CFG")
+  echo "Launched detached container: $CONTAINER_NAME ($CID)"
+  echo "Monitor:  docker logs -f $CONTAINER_NAME"
+  echo "          tail -1 ${NS3_OUT_DIR}/qlen.txt   # simulated time (ns)"
+  exit 0
+fi
+
 docker run --rm --shm-size="$DOCKER_SHM" \
   -v /Users/sahas/workplace/astra-sim:/app/astra-sim \
   -v /Users/sahas/workplace/llm-parallelism:/app/llm-parallelism \
