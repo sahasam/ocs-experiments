@@ -152,7 +152,7 @@ See [`lab-notes/experiments/2026-06-13-exp4-16gpu-ocs-ps-ns3.md`](lab-notes/expe
 
 On the thin spine, PP cross-stage sends pay **5.6× congestion** (worst flow 8.7×) while intra-pod DP all-reduce is unaffected — exactly the traffic OCS isolates. But a 5.6× PP penalty is only ~183 ms on the ~4.8 s step because most comm hides behind compute, so the step-level win is ~+3.8%. The algorithm dimension grows from +0.3% → +4.1% as the fabric narrows from 50 → 5 GB/s, which points to where OCS wins bigger.
 
-See [`lab-notes/experiments/2026-06-13-exp5-coupled-ocs-direct-vs-ring.md`](lab-notes/experiments/2026-06-13-exp5-coupled-ocs-direct-vs-ring.md) and the [summary note](lab-notes/2026-06-14-note-to-ahmed.pdf).
+See [`lab-notes/experiments/2026-06-13-exp5-coupled-ocs-direct-vs-ring.md`](lab-notes/experiments/2026-06-13-exp5-coupled-ocs-direct-vs-ring.md) and the [summary note](lab-notes/2026-06-14-note-to-ahmad.pdf).
 
 ---
 

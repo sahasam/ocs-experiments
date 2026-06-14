@@ -1,10 +1,10 @@
 # OCS-vs-PS for LLM training networks — findings, the experiment loop, and what's next
 
-**To:** Ahmed
+**To:** Ahmad
 **From:** Sahas
 **Date:** 2026-06-14
 
-Ahmed —
+Ahmad —
 
 Quick brain-dump on where the optical-circuit-switch (OCS) vs packet-switch (PS) study stands, how the simulation loop is wired now, and the experiments I think are worth running next.
 
