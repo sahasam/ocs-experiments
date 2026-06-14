@@ -1,0 +1,101 @@
+\documentclass[11pt]{article}
+\usepackage[a4paper,margin=1in]{geometry}
+\usepackage{amsmath}
+\usepackage{microtype}
+\usepackage{enumitem}
+\usepackage{xcolor}
+\usepackage{titlesec}
+\usepackage[hidelinks]{hyperref}
+\usepackage{textcomp}
+
+\setlist{leftmargin=1.4em,topsep=2pt,itemsep=2pt}
+\titlespacing*{\section}{0pt}{10pt}{4pt}
+\titleformat{\section}{\large\bfseries}{}{0em}{}
+\setlength{\parindent}{0pt}
+\setlength{\parskip}{5pt}
+
+\newcommand{\code}[1]{\texttt{#1}}
+
+\begin{document}
+
+\begin{center}
+{\Large\bfseries OCS-vs-PS for LLM training networks}\\[2pt]
+{\normalsize findings, the experiment loop, and what's next}
+\end{center}
+
+\vspace{4pt}
+\textbf{To:} Ahmed \hfill \textbf{From:} Sahas \hfill \textbf{Date:} 2026-06-14
+
+\vspace{6pt}
+Ahmed~---
+
+Quick brain-dump on where the optical-circuit-switch (OCS) vs packet-switch (PS) study stands, how the simulation loop is wired now, and the experiments I think are worth running next.
+
+\section*{TL;DR}
+
+For an 8B model on 400\,Gbps-class links, the network is a \textbf{few-percent effect whichever way you cut it.} The OCS advantage decomposes into two dimensions and we can now measure each cleanly:
+
+\begin{itemize}
+\item \textbf{Algorithm} (direct all-reduce on dedicated circuits vs ring): \textbf{$\sim$0.3\%} at 50\,GB/s.
+\item \textbf{Congestion} (no fabric contention vs a thin shared PS spine): \textbf{$\sim$3.8\%}.
+\end{itemize}
+
+The congestion dimension is $\sim$10$\times$ the algorithm dimension --- so the OCS value is real and it lives where we expected (PP traffic on the shared spine) --- but both are small \textit{for this workload} because it's bubble/compute-bound. The interesting next question is the regime where comm gets exposed on the critical path and these numbers grow.
+
+\section*{Findings so far}
+
+\textbf{1. Synthetic sweeps (8B / 70B / 405B at 64--512 ranks):}
+\begin{itemize}
+\item OCS sensitivity is dominated by \textbf{DP degree, not model size.} 8B/70B at DP=8 need circuit count $C \geq 128$ (current Palomar port count) to stay within $\sim$1\% of PS; 405B at DP=2 is essentially OCS-immune at any realistic $C$. The dangerous scaling path for fabric design is growing ranks by \textbf{doubling DP, not PP.}
+\item \textbf{Circuit setup latency ($T_{\text{setup}}$) is irrelevant} at commercial MEMS timescales ($\leq$27\,ms). 1F1B pipeline scheduling leaves 100\,ms--5\,s of natural slack between a PP send completing and its data being consumed, which absorbs the switching time entirely. \textbf{Capacity ($C$), not latency, is the binding constraint.}
+\end{itemize}
+
+\textbf{2. The 16-GPU OCS-vs-PS deep dive (8B, TP1/PP2/DP8)} --- this is the controlled experiment:
+\begin{itemize}
+\item Built a coupled forward DAG scheduler for the OCS side and validated it to \textbf{$\sim$0.3\% against AstraSim} on two independent gates (infinite-bandwidth reproduces the ideal floor; ring @ 50\,GB/s reproduces our earlier coupled numbers). So the OCS number is artifact-free and trustworthy.
+\item Against a thin 8:1-oversubscribed Clos PS baseline (packet-level ns-3, HPCC): \textbf{stage-0 step +3.8\%, stage-1 +4.0\%} over the OCS floor.
+\item The per-flow breakdown is the thesis in one table: \textbf{PP cross-stage sends pay 5.6$\times$ congestion} (worst flow 8.7$\times$) on the thin shared spine, while \textbf{DP all-reduce stays intra-pod and is comparable or even better} on the Clos. The contention is on the spine, and it's PP traffic that pays --- exactly what OCS's dedicated circuits erase. The reason it's ``only'' +3.8\% at the step level is that a 5.6$\times$ penalty on PP sends is $\sim$183\,ms, and most of that comm hides behind compute.
+\end{itemize}
+
+\section*{The experiment loop we've set up}
+
+The whole pipeline runs on CPU --- no GPU cluster needed for the analysis:
+
+\begin{enumerate}
+\item \textbf{Workload generation --- STAGE} (symbolic tensor graph) synthesizes Chakra execution traces for distributed LLM workloads symbolically. Validated at 0.23\% comm-volume error vs a real 128-GPU H100 run. One trace freezes the workload; network/system are separate config, so a trace is reusable across every network sweep.
+\item \textbf{OCS side --- three engines, each answering a different question:}
+\begin{itemize}
+\item \code{ocs\_replay} --- delay propagator for capacity-$C$ contention sweeps (``how much does a $C$-circuit fabric stretch the step'').
+\item \code{dag\_sim} --- per-rank roofline + bandwidth-optimal direct collective cost model.
+\item \code{coupled\_sim} --- the newest one: a global forward DAG scheduler that combines \code{dag\_sim}'s direct cost model with cross-rank coupling (PP send$\to$recv edges, collective barriers). It's the only engine that can model a \textit{faster algorithm} and the PP bubble at the same time. The bubble emerges from the graph rather than being hacked in.
+\end{itemize}
+\item \textbf{PS ground truth --- ns-3} packet-level simulation on real fat-tree / thin-Clos topologies with HPCC congestion control.
+\item \textbf{Common anchor --- an ideal floor} (infinite bandwidth) so OCS and PS are each reported as \textit{overhead above} the unavoidable compute+latency floor, which lets us compare the analytical OCS backend and the packet-level PS backend apples-to-apples.
+\end{enumerate}
+
+A 16-rank ns-3 run is $\sim$40\,min wall; the analytical/coupled engines are seconds.
+
+\section*{Potential experiments}
+
+\textbf{A. Push into the OCS-favorable regime (highest value).} The +3.8\% is gated by comm-hiding, not the size of the congestion. The knobs that expose comm on the critical path and should grow the gap:
+\begin{itemize}
+\item \textbf{Lower link bandwidth} (100--200\,Gbps) --- we already see direct$-$ring go 0.3\% $\to$ 4.1\% as bandwidth drops 50 $\to$ 5\,GB/s.
+\item \textbf{Larger DP degree} (the synthetic sweeps say this dominates).
+\item \textbf{Smaller compute per step / deeper pipelines with tighter bubbles.}
+\end{itemize}
+
+\textbf{B. Scale the controlled experiment to 70B / 405B.} Right now the big models only have synthetic-sweep numbers; the coupled-vs-ns-3 deep dive is 8B only.
+
+\textbf{C. A controlled 4:1-vs-8:1 spine A/B.} The current thin-Clos result mixes two variables (we had to drop to 8:1 / 400\,Gbps because this ns-3 HPCC build rejects non-standard link rates). A clean single-variable oversubscription sweep would isolate the spine effect.
+
+\textbf{D. A QoS-aware PS baseline.} Our current PS is best-effort (no priority queuing), which is the \textit{conservative} comparison for OCS. Worth documenting what QoS would neutralize.
+
+\textbf{E. Real trace capture as validation} (optional). Phases 0--1 are designed: pure-DP and TP/PP/DP-hybrid 8B on a single 8-GPU node, $\sim$\$25--75. Validates STAGE's synthetic traces against real op structure.
+
+\vspace{4pt}
+Happy to walk through any of this or share the lab notes. My instinct is \textbf{A} is where the story gets compelling --- everything so far says the 8B / 400\,Gbps point is just too easy on the network for OCS to shine, and the honest framing is ``here's the workload regime where circuits start to matter.''
+
+\vspace{6pt}
+--- Sahas
+
+\end{document}
