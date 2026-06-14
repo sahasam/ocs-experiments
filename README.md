@@ -2,19 +2,26 @@
 
 Simulation study of **optical circuit switching (OCS) for LLM training interconnects**, using [STAGE](https://github.com/astra-sim/symbolic_tensor_graph) to generate Chakra execution traces and [AstraSim](https://github.com/astra-sim/astra-sim) for coupled distributed training simulation.
 
-The central question: how much does circuit-switched (optical) inter-node fabric hurt a training step under different parallelism layouts, and what determines the impact?
+The central question: how much does an optical-circuit-switched (OCS) inter-node fabric help or hurt a training step versus a packet-switched (PS) fabric, under different parallelism layouts, and what determines the impact?
+
+## Headline findings
+
+- **The OCS advantage is two-dimensional, and the two dimensions are very different sizes.** For an 8B model on 400 Gbps-class links it decomposes into *(1)* the better collective algorithm OCS enables (direct all-reduce on dedicated circuits vs ring): **~0.3%** at 50 GB/s, and *(2)* freedom from fabric congestion vs a thin shared PS spine: **~3.8%**. Congestion is ~10× the algorithm effect, but both are small here because the workload is bubble/compute-bound — the network is a few-percent effect whichever way you cut it.
+- **OCS sensitivity is dominated by DP degree, not model size.** 8B/70B at DP=8 need circuit count C ≥ 128 to stay within ~1% of a packet fabric; 405B at DP=2 is essentially OCS-immune at any realistic C. Scaling ranks by doubling DP (not PP) is the dangerous path for fabric design.
+- **Circuit setup latency is irrelevant** at commercial MEMS timescales (≤27 ms): 1F1B pipeline scheduling leaves 100 ms–5 s of slack that absorbs it. Circuit *capacity* (C), not latency, is the binding constraint.
+- **The contention OCS erases is on the shared spine, and PP traffic pays it.** On a thin 8:1 Clos, PP cross-stage sends run 5.6× slower than ideal while intra-pod DP all-reduce is unaffected — OCS's dedicated circuits target exactly that traffic.
 
 ## Pipeline
 
 ```
-STAGE (CPU, symbolic)          AstraSim (Docker)            OCS trace-replay (Python)
-──────────────────────   →    ──────────────────────   →   ───────────────────────────
-Chakra ETs for any             Coupled per-rank timing       Re-time OCS tier under
-DP/TP/PP/SP layout             (PP stalls, compute           capacity-C contention,
-No GPU cluster needed          overlap, roofline)            propagate delays
+STAGE (CPU, symbolic)        AstraSim / coupled sim        OCS engines (Python)         PS ground truth
+─────────────────────   →   ──────────────────────   →   ──────────────────────   vs  ──────────────────
+Chakra ETs for any           Coupled per-rank timing       C-sweep contention            Packet-level ns-3
+DP/TP/PP/SP layout           (PP stalls, compute           + coupled forward DAG         fat-tree / Clos,
+No GPU cluster needed         overlap, roofline)            scheduler (direct algo)       HPCC, ring algo
 ```
 
-**No GPU cluster required.** STAGE generates symbolically-exact Chakra ETs validated at 0.23% comm-volume error vs a real 128-GPU H100 run. AstraSim runs in Docker.
+**No GPU cluster required.** STAGE generates symbolically-exact Chakra ETs validated at 0.23% comm-volume error vs a real 128-GPU H100 run. AstraSim and ns-3 run in Docker. Both fabrics are anchored to a common ideal floor (infinite bandwidth) so each is reported as overhead *above* the unavoidable compute+latency cost.
 
 ## Setup
 
@@ -116,15 +123,45 @@ OCS tier = DP all-reduces (group size 4) + PP point-to-point sends. TP collectiv
 
 **Next step:** Re-run ns-3 with ring algorithm in system config, or use analytical congestion-aware + Switch as a fast conservative baseline.
 
-See [`experiments/exp3-ns3-fat-tree-baseline.md`](experiments/exp3-ns3-fat-tree-baseline.md) for full details.
+See [`lab-notes/experiments/2026-06-11-exp3-ns3-fat-tree-baseline.md`](lab-notes/experiments/2026-06-11-exp3-ns3-fat-tree-baseline.md) for full details.
+
+---
+
+### Exp 4 — 16-GPU OCS vs PS, ring-on-both-sides (congestion-only baseline)
+
+**Config:** Llama-3 8B, 16 ranks (TP=1, PP=2, DP=8). OCS side analytical (FullyConnected, congestion-free); PS side packet-level ns-3 on a 4:1 fat-tree, HPCC. **Ring all-reduce on both sides** to isolate the topology effect from the algorithm confound found in Exp 3.
+
+**Finding:** A clean, deliberately *conservative* lower bound. PP stage-1 step is +2.7% on the PS fat-tree vs the OCS floor. The per-flow breakdown (from `fct.txt`) is the mechanism: PP activation/gradient sends run **4.1× slower** than ideal because 268 MB flows compete with DP ring traffic on the oversubscribed spine, while DP ring flows see 2–3×. This validates the core hypothesis — *DP traffic on a shared fabric degrades the PP critical path* — but ring-vs-ring throws away the headline OCS advantage (the direct algorithm), so a redesign was needed.
+
+See [`lab-notes/experiments/2026-06-13-exp4-16gpu-ocs-ps-ns3.md`](lab-notes/experiments/2026-06-13-exp4-16gpu-ocs-ps-ns3.md).
+
+---
+
+### Exp 5 — Coupled forward DAG scheduler: OCS direct vs PS thin-Clos
+
+**Config:** Same 8B TP1/PP2/DP8 workload. New OCS engine `coupled_sim.py` — a global event-driven scheduler over every rank's ET that combines a bandwidth-optimal *direct* collective cost model with the cross-rank PP send→recv / collective-barrier coupling (the PP bubble emerges from the graph, not a hack). The collective algorithm is switchable (`direct` = OCS, `ring` = PS) so one engine produces both sides. PS ground truth: a thin 8:1 Clos (2 leaf + 1 spine, DP intra-pod) in ns-3.
+
+**Validation (two gates, both pass):** at infinite bandwidth the scheduler reproduces the AstraSim ideal floor (stage-1 exact to the ns, stage-0 +0.16%); at ring @ 50 GB/s it reproduces Exp 4's numbers to ~0.3%, with direct ≤ ring always.
+
+**Finding — the two-dimensional decomposition (headline):**
+
+| dimension | mechanism | step impact (8B, 50 GB/s) |
+|---|---|---|
+| Algorithm | direct all-reduce vs ring | **+0.3%** |
+| Congestion | OCS floor vs thin-Clos PS (8:1) | **+3.8%** (stage 0), +4.0% (stage 1) |
+
+On the thin spine, PP cross-stage sends pay **5.6× congestion** (worst flow 8.7×) while intra-pod DP all-reduce is unaffected — exactly the traffic OCS isolates. But a 5.6× PP penalty is only ~183 ms on the ~4.8 s step because most comm hides behind compute, so the step-level win is ~+3.8%. The algorithm dimension grows from +0.3% → +4.1% as the fabric narrows from 50 → 5 GB/s, which points to where OCS wins bigger.
+
+See [`lab-notes/experiments/2026-06-13-exp5-coupled-ocs-direct-vs-ring.md`](lab-notes/experiments/2026-06-13-exp5-coupled-ocs-direct-vs-ring.md) and the [summary note](lab-notes/2026-06-14-note-to-ahmed.pdf).
 
 ---
 
 ### Open experiments
 
-- **PS baseline (fair)** — re-run ns-3 with `ring` all-reduce, or run analytical congestion-aware + Switch topology as a fast lower bound.
-- **Rotor latency-floor sweep** — replay models bandwidth-sharing only; `T_cycle/2` circuit-wait floor for PP sends not yet applied. Negligible for ns rotors; potentially significant for ms MEMS.
-- **PP-heavy TP8/PP4/DP2** — adversarial OCS config (smaller DP group, heavier pipeline pressure).
+- **Push into the OCS-favorable regime** (highest value) — the few-percent win is gated by comm-hiding, not congestion size. Lower link bandwidth (100–200 Gbps), larger DP degree, smaller compute/step, and deeper pipelines all expose more comm on the critical path and should grow the gap.
+- **Scale the controlled deep-dive to 70B / 405B** — the big models currently have only synthetic-sweep numbers; the coupled-vs-ns-3 comparison is 8B only.
+- **Controlled 4:1-vs-8:1 spine A/B** — Exp 5's thin-Clos differs from Exp 4's fat-tree on two variables; a single-variable oversubscription sweep would cleanly isolate the spine effect.
+- **QoS-aware PS baseline** — the current PS is best-effort (no priority queuing), a conservative comparison for OCS; quantify what QoS would neutralize.
 - **GPU capture validation** — real Megatron-LM trace (Phase 0: 8×A100, pure DP) to validate STAGE byte-counts and compute times.
 
 ## Repo layout
@@ -133,21 +170,26 @@ See [`experiments/exp3-ns3-fat-tree-baseline.md`](experiments/exp3-ns3-fat-tree-
 astrasim/synthetic/
 ├── Makefile                    # entry point: make / make et / make sim / make sweep
 ├── run_ocs_sweep.py            # OCS C-sweep CLI (wraps ocs_replay)
+├── run_coupled.py              # coupled forward DAG scheduler driver (ideal/direct/ring)
 ├── generate_stage_et.sh        # STAGE wrapper: DP/TP/PP/MODEL → Chakra ETs
 ├── run_astrasim_stage.sh       # AstraSim Docker runner (bigmem image, trace logging)
-├── stage_configs/              # system.json, memory.json, Dockerfile.bigmem
+├── run_astrasim_ns3.sh         # ns-3 packet-level PS runner (DETACH, topo file)
+├── analyze_fct.py              # per-flow-size congestion slowdown from ns-3 fct.txt
+├── stage_configs/              # system.json, memory.json, ns-3 topos, Dockerfile.bigmem
 ├── hybrid_net/
 │   ├── trace_loader.py         # parse AstraSim trace log → per-node timeline
 │   ├── ocs_penalty.py          # isolate OCS-tier flows, concurrency profile
-│   ├── ocs_replay.py           # delay-propagation C-sweep (the deliverable)
-│   ├── dag_sim.py              # roofline + collective math (used by replay)
+│   ├── ocs_replay.py           # delay-propagation C-sweep (capacity contention)
+│   ├── coupled_sim.py          # coupled forward DAG scheduler (direct algo + PP bubble)
+│   ├── dag_sim.py              # roofline + collective math (used by replay/coupled)
 │   ├── et_loader.py            # Chakra ET reader
 │   ├── collectives.py          # direct-algorithm collective cost model
 │   ├── tdm_model.py            # TDM/rotor OCS bandwidth derating
 │   ├── scheduler.py            # circuit scheduling
 │   └── presets.py              # sirius_like, rotornet_like, etc.
 ├── workloads/                  # legacy per-rank workload descriptors
-└── results/                    # gitignored (ETs, logs, traces)
+└── results/                    # gitignored (ETs, logs, traces, ns-3 fct/qlen)
+lab-notes/                      # experiment writeups, learnings, result tables
 src/
 ├── model.py                    # nanoGPT (CPU smoke test)
 ├── trace_capture.py            # ExecutionTraceObserver wrapper
