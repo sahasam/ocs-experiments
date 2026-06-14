@@ -1,7 +1,7 @@
 # Exp 5 — Coupled forward DAG scheduler: OCS direct vs ring vs ideal floor
 
 **Date:** 2026-06-13
-**Status:** OCS side complete and gate-validated. PS thin-Clos ns-3 run still pending.
+**Status:** Complete. OCS side gate-validated; PS thin-Clos ns-3 baseline finished.
 **Builds on:** `learnings/2026-06-13-why-redesign-ocs-experiment.md`, Exp 4.
 
 ---
@@ -89,7 +89,7 @@ run 4.1× slower than ideal on the shared fat-tree spine. OCS's congestion-free 
 *is* essentially the ideal floor (direct @ 50 ≈ floor + 0.3%), so the whole OCS-vs-PS
 gap will come from PS congestion, not the algorithm.
 
-## The PS thin-Clos baseline (running)
+## The PS thin-Clos baseline (complete)
 
 To isolate "PP traffic on a thin shared spine" (the case OCS's dedicated circuits win),
 built `stage_configs/ns3_topo_16_clos_thin.txt`: a 3-switch Clos (2 leaf + 1 spine).
@@ -117,9 +117,69 @@ DETACH=1 SYSTEM_CFG=.../system_ns3.json \
   bash run_astrasim_ns3.sh llama3_8b_tp1_pp2_dp8 16
 ```
 
+## Results — PS thin-Clos vs OCS floor
+
+The run completed in ~40 min wall (4.96 s simulated, 15,248 flows). As in Exp 4,
+stage 1 finished first; stage 0 (the bottleneck) finished 1.64 s of simulated time
+later — and this time we **got the complete stage-0 number** (Exp 4's was killed).
+
+**Step time (Wall):**
+
+| stage | OCS floor (coupled direct) | PS thin-Clos 8:1 (ns-3) | overhead |
+|-------|----------------------------|-------------------------|----------|
+| 0 (ranks 0–7)  | 4779.2 ms | **4962.5 ms** | **+3.8%** |
+| 1 (ranks 8–15) | 3191.9 ms | **3318.3 ms** | **+4.0%** |
+
+**Per-flow congestion (fct/ideal_fct), thin-Clos 8:1 vs Exp 4 fat-tree 4:1:**
+
+| flow type | size | count | ideal | fat-tree 4:1 | **thin-Clos 8:1** |
+|-----------|------|-------|-------|--------------|-------------------|
+| PP cross-stage send | 256 MiB | 16 | 5630 µs | 4.13× (max 5.42×) | **5.63× (max 8.67×)** |
+| DP AR — embedding | 15.7 MB | 896 | 346 µs | 2.49× | 2.70× |
+| DP AR — transformer | 5.5 MB | 14336 | 123 µs | 3.05× | **2.40×** |
+
+### Reading the result
+
+1. **The thin shared spine hits exactly the traffic OCS isolates.** Halving the spine
+   (2 spines → 1, 4:1 → 8:1) pushes **PP-send** slowdown from 4.13× to **5.63×** (worst
+   flow 8.67×). Meanwhile **DP all-reduce is intra-pod** (each stage's 8-rank DP group
+   lives on one leaf, never crossing the spine) so it's comparable or even *better* on
+   the Clos (transformer AR 3.05× → 2.40×, since fewer spine-transiting PP flows disturb
+   the leaf). This is the OCS thesis in one table: **the contention is on the shared
+   spine, and it's PP traffic that pays.** OCS gives PP its own circuits and erases it.
+
+2. **But at the step level it's only ~+4%, because the workload is bubble/compute-bound.**
+   A 5.63× PP-send penalty translates to just +183 ms on the 4779 ms stage-0 step — most
+   PP/DP comm overlaps with compute, so only the exposed tail on the critical path counts.
+   This is the same lesson as the OCS-side direct-vs-ring result (+0.3%): **for an 8B
+   model at 400 Gbps-class links, the network is a few-percent effect, whichever way you
+   cut it** — algorithm (direct vs ring) ~0.3%, fabric congestion (OCS vs thin-Clos PS)
+   ~3.8%. The congestion dimension is ~10× the algorithm dimension, confirming where the
+   OCS value is, but both are small here.
+
+3. **Where OCS would win bigger:** the +3.8% is gated by comm-hiding, not by the size of
+   the congestion. Workloads that expose more comm on the critical path — lower
+   bandwidth, larger DP degree, smaller compute per step, deeper pipelines with tighter
+   bubbles — would convert the 5.6× PP-send penalty into a larger step-time gap. The
+   bandwidth sweep above (direct−ring 0.3%→4.1% as bw drops 50→5 GB/s) is the same knob.
+
+### Honest caveats
+
+- 8:1 vs Exp 4's 4:1 means this isn't a controlled 1-variable delta against the fat-tree;
+  it's a deliberately stressed thin fabric. The 4:1 → 8:1 row still reads cleanly as
+  "thinner spine ⇒ worse PP congestion," but the absolute +3.8% is specific to 8:1.
+- The OCS side is analytical/coupled (congestion-free by construction); the PS side is
+  packet-level ns-3. They share the same ETs, compute model, and ring algorithm, and are
+  anchored to a common ideal floor, so the comparison is apples-to-apples up to the
+  backend (analytical vs packet) — the same caveat as Exp 4.
+
 ## Artifacts
 
 - `hybrid_net/coupled_sim.py` — the coupled forward DAG scheduler
 - `run_coupled.py` — driver (ideal / direct / ring on one engine)
+- `analyze_fct.py` — per-flow-size congestion slowdown from an ns-3 fct.txt
 - `stage_configs/network_fc_16_ideal.yml` — Gate A ideal-floor network
-- `stage_configs/ns3_topo_16_clos_thin.txt` — thin Clos PS topology (PS run pending)
+- `stage_configs/ns3_topo_16_clos_thin.txt` — thin Clos PS topology (2 leaf + 1 spine, 8:1)
+- `run_astrasim_ns3.sh` — now supports `DETACH=1`, `NS3_OUT_SUBDIR`, `LOG_NAME`
+- `results/llama3_8b_tp1_pp2_dp8/ns3_output_clos/` — thin-Clos fct.txt / qlen.txt
+- `results/llama3_8b_tp1_pp2_dp8/logs/clos_stdout_durable.log` — ns-3 Wall-time log
