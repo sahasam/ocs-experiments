@@ -16,4 +16,7 @@ third_party/
 
 astrasim/synthetic/results/
 
+# Lab notes (research thinking, experiment/learning records, note-to-ahmad) live here
+# in the repo under lab-notes/ and are tracked. The distilled graph lives in ~/knowledge/.
+
 .DS_Store
