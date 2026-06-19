@@ -19,4 +19,10 @@ astrasim/synthetic/results/
 # Lab notes (research thinking, experiment/learning records, note-to-ahmad) live here
 # in the repo under lab-notes/ and are tracked. The distilled graph lives in ~/knowledge/.
 
+# LaTeX build artifacts for the FTS paper (keep fts2026.tex + fts2026.pdf, drop the rest).
+paper/*.aux
+paper/*.out
+paper/*.synctex.gz
+paper/pg*.png
+
 .DS_Store
